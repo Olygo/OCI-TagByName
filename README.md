@@ -90,7 +90,7 @@ By default **OCI-TagByName** tries to authenticate using Instance Principals
 	python3 ./OCI-TagByName.py -all -cf -rg eu-paris-1 -tlc ocid1.compartment.oc1..aaaaaaaaurxxxx -tn MyTags -tk display_name
 
 ##### Script output
-![Script Output](https://objectstorage.eu-frankfurt-1.oraclecloud.com/p/ArOLIb0vUtXvhlffPSXKqA1V7pkm4l_Ecrj7pqEXWJ6tL-BSGg41CWqsIEeUMOa9/n/olygo/b/git_images/o/OCI-TagByName/output.png)
+![Script Output](https://objectstorage.eu-frankfurt-1.oraclecloud.com/p/ArOLIb0vUtXvhlffPSXKqA1V7pkm4l_Ecrj7pqEXWJ6tL-BSGg41CWqsIEeUMOa9/n/olygo/b/git_images/o/OCI-TagByName/output2.png)
 
 ##### Instance tag
 ![Tag Instance](https://objectstorage.eu-frankfurt-1.oraclecloud.com/p/ArOLIb0vUtXvhlffPSXKqA1V7pkm4l_Ecrj7pqEXWJ6tL-BSGg41CWqsIEeUMOa9/n/olygo/b/git_images/o/OCI-TagByName/tagInstance.png)
