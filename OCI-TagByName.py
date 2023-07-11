@@ -1,15 +1,23 @@
 # coding: utf-8
 
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # name: OCI-TagCompute.py
-# task: tag resources using display_name of each resource in order to get cost per display_name
+# task: tag resources using display_name 
+#       of each resource in order to get 
+#       cost per display_name
 #
-# author: Florian Bonneville
-# version: 1.0 - june 13th 2023
-# 
-# ***********************************************************************
+# Author: Florian Bonneville
+# Version: 1.1 - July 06th, 2023
+#
+# Disclaimer: 
+# This script is an independent tool developed by 
+# Florian Bonneville and is not affiliated with or 
+# supported by Oracle. It is provided as-is and without 
+# any warranty or official endorsement from Oracle
+#
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # oci search for all resources using this tag :
-# ***********************************************************************
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # query all resources where
 #                         definedTags.namespace == 'My_Namespace' 
 #                      && definedTags.key == 'display_name'
@@ -21,59 +29,75 @@
 #                      && definedTags.key == 'display_name' 
 #                      && definedTags.value == 'SERVICE_NAME'
 #
-# ***********************************************************************
-#
-# disclaimer: this is not an official Oracle application,  
-# it does not supported by Oracle Support
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
+import os
 import oci
 import copy
 import argparse
-import datetime
-from modules.identity import * 
-from modules.resources import *
-from modules.tagging import *
-from modules.utils import *
+from datetime import datetime
+from modules.identity import create_signer, check_compartment_state, get_region_subscription_list, get_compartment_name, get_compartment_list, check_tags, list_ads
+from modules.resources import ResourcesFinder
+from modules.tagging import ResourcesTagger
+from modules.utils import green, yellow, red, magenta, cyan, clear, print_info, print_output, strfdelta
 
-ScriptName = 'OCI-TagByName'
-starting = datetime.datetime.now()
+script_path = os.path.abspath(__file__)
+script_name = (os.path.basename(script_path))[:-3]
+analysis_start = datetime.now()
 
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # get command line arguments
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-parser=argparse.ArgumentParser()
+def parse_arguments():
+    parser = argparse.ArgumentParser()
 
-# default authentication uses instance_principals
+    parser.add_argument('-cs', action='store_true', default=False, dest='is_delegation_token', 
+                        help='Use CloudShell Delegation Token for authentication')
+    parser.add_argument('-cf', action='store_true', default=False, dest='is_config_file', 
+                        help='Use local OCI config file for authentication')
+    parser.add_argument('-cfp', default='~/.oci/config', dest='config_file_path', 
+                        help='Path to your OCI config file, default: ~/.oci/config')
+    parser.add_argument('-cp', default='DEFAULT', dest='config_profile', 
+                        help='config file section to use, default: DEFAULT')
+    parser.add_argument('-tlc', default='', dest='target_comp', 
+                        help='compartment ocid to analyze, default is your root compartment')
+    parser.add_argument('-exc', default='', dest='exclude_comp', 
+                        help='compartment ocid to exclude, default is none')
+    parser.add_argument('-rg', default='', dest='target_region', 
+                        help='region to analyze, default: all regions')
+    parser.add_argument('-tn', default='', dest='tag_namespace', 
+                        help='name of the TagNamespace owning your TagKey',required=True)
+    parser.add_argument('-tk', default='', dest='tag_key', 
+                        help='name of the TagKey to apply',required=True)
+    parser.add_argument('-c', action='store_true', default=False, dest='compute', 
+                        help='Tag Compute resources')
+    parser.add_argument('-s', action='store_true', default=False, dest='storage', 
+                        help='Tag Object Storage resources')
+    parser.add_argument('-n', action='store_true', default=False, dest='network', 
+                        help='Tag Network resources')
+    parser.add_argument('-d', action='store_true', default=False, dest='database', 
+                        help='Tag Database resources')
+    parser.add_argument('-a', action='store_true', default=False, dest='analytics', 
+                        help='Tag Analytics resources')
+    parser.add_argument('-dev', action='store_true', default=False, dest='development', 
+                        help='Tag Development resources')
+    parser.add_argument('-all', action='store_true', default=False, dest='all_services', 
+                        help='Tag all supported resources')
 
-parser.add_argument('-cs', action='store_true', default=False, dest='is_delegation_token', help='Use CloudShell Delegation Token for authentication')
-parser.add_argument('-cf', action='store_true', default=False, dest='is_config_file', help='Use local OCI config file for authentication')
-parser.add_argument('-cfp', default='~/.oci/config', dest='config_file_path', help='Path to your OCI config file, default: ~/.oci/config')
-parser.add_argument('-cp', default='DEFAULT', dest='config_profile', help='config file section to use, default: DEFAULT')
-parser.add_argument('-tlc', default='', dest='target_comp', help='compartment ocid to analyze, default is your root compartment')
-parser.add_argument('-rg', default='', dest='target_region', help='region to analyze, default: all regions')
-parser.add_argument('-tn', default='', dest='TagNamespace', help='name of the TagNamespace owning your TagKey',required=True)
-parser.add_argument('-tk', default='', dest='TagKey', help='name of the TagKey to apply',required=True)
-parser.add_argument('-c', action='store_true', default=False, dest='compute', help='Tag Compute resources')
-parser.add_argument('-s', action='store_true', default=False, dest='storage', help='Tag Object Storage resources')
-parser.add_argument('-n', action='store_true', default=False, dest='network', help='Tag Network resources')
-parser.add_argument('-d', action='store_true', default=False, dest='database', help='Tag Database resources')
-parser.add_argument('-a', action='store_true', default=False, dest='analytics', help='Tag Analytics resources')
-parser.add_argument('-dev', action='store_true', default=False, dest='development', help='Tag Development resources')
-parser.add_argument('-all', action='store_true', default=False, dest='all_services', help='Tag all supported resources')
+    return parser.parse_args()
 
-cmd = parser.parse_args()
-
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # clear shell screen
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 clear()
 
-##################################################################################################################
-# check arguments
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
+# retrieve arguments
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+cmd = parse_arguments()
 
 if cmd.all_services:
     cmd.compute = True
@@ -83,17 +107,16 @@ if cmd.all_services:
     cmd.analytics = True
     cmd.development = True
 
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # print header
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-print()
-print(green(f"{'*'*79:79}"))
-print(green(f"{'*'*5:10} {'Analysis:':20} {'started':20} {ScriptName:20} {'*'*5:5}"))
+print(green(f"\n{'*'*94:94}"))
+print_info(green, 'Analysis', 'started', script_name)
 
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # oci authentication
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 config, signer, oci_tname=create_signer(cmd.config_file_path, 
                                         cmd.config_profile, 
@@ -101,55 +124,68 @@ config, signer, oci_tname=create_signer(cmd.config_file_path,
                                         cmd.is_config_file)
 tenancy_id=config['tenancy']
 
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # init oci service clients
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-identity_client=oci.identity.IdentityClient(config=config, signer=signer)
-search_client = oci.resource_search.ResourceSearchClient(config=config, signer=signer)
+identity_client=oci.identity.IdentityClient(
+                config=config, 
+                signer=signer)
 
-##################################################################################################################
-# set target compartments & regions
-##################################################################################################################
+search_client=oci.resource_search.ResourceSearchClient(
+                config=config, 
+                signer=signer)
 
-if cmd.target_comp:
-    top_level_compartment_id=cmd.target_comp
-    compartment_name = get_compartment_name(identity_client, top_level_compartment_id)
-    print(green(f"{'*'*5:10} {'Compartment:':20} {'filtered':20} {compartment_name[:18]:20} {'*'*5:5}"))
-else:
-    top_level_compartment_id=tenancy_id
-    compartment_name = get_compartment_name(identity_client, top_level_compartment_id)
-    print(green(f"{'*'*5:10} {'Compartment:':20} {'tenancy':20} {compartment_name[:18]:20} {'*'*5:5}"))
+obj_storage_client=oci.object_storage.ObjectStorageClient(
+                config=config, 
+                signer=signer)
 
-my_compartments=get_compartment_list(identity_client, top_level_compartment_id)
-print(green(f"{'*'*5:10} {'Compartments:':20} {'analyzed':20} {len(my_compartments):<20} {'*'*5:5}"))
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
+# set target regions
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+analyzed_regions=get_region_subscription_list(
+                                         identity_client, 
+                                         tenancy_id, 
+                                         cmd.target_region)
+
+print_info(green, 'Region(#)', 'selected', len(analyzed_regions))
 
 if cmd.target_region:
-    print(green(f"{'*'*5:10} {'Region:':20} {'filtered':20} {cmd.target_region:20} {'*'*5:5}"))
-else:
-    print(green(f"{'*'*5:10} {'Regions:':20} {'analyzed':20} {'all_regions':20} {'*'*5:5}"))
+    print_info(green, 'Region(s)', 'analyzed', cmd.target_region)
 
-all_regions=get_region_subscription_list(identity_client, tenancy_id, cmd.target_region)
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
+# set target compartments
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-if not cmd.target_region:
-    print(green(f"{'*'*5:10} {'Regions:':20} {'subscribed':20} {len(all_regions):<20} {'*'*5:5}"))
+top_level_compartment_id = cmd.target_comp or tenancy_id
+check_compartment_state(identity_client, top_level_compartment_id)
+compartment_name = get_compartment_name(identity_client, top_level_compartment_id)
+print_info(green, 'Compartment', 'parent source', compartment_name[:33])
 
-##################################################################################################################
+if cmd.exclude_comp:
+    excluded_compartment_name = get_compartment_name(identity_client, cmd.exclude_comp)
+    print_info(green, 'Compartment', 'excluded', excluded_compartment_name[:33])
+
+my_compartments=get_compartment_list(identity_client, top_level_compartment_id, cmd.exclude_comp)
+print_info(green, 'Compartment(#)', 'selected', len(my_compartments))
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # check TagNamespace and TagKey
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-check_tags(identity_client, search_client, cmd.TagNamespace, cmd.TagKey)
+check_tags(identity_client, search_client, cmd.tag_namespace, cmd.tag_key)
 
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # print header
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-print(green(f"{'*'*79:79}\n"))
-print(f"{'REGION':15}  {'AD':6}  {'COMPARTMENT':20}  {'RESOURCE_TYPE':15}  {'RESOURCE_NAME':20}\n")
+print(green(f"{'*'*94:94}\n"))
+print(f"{'REGION':20}{'AD':6}{'COMPARTMENT':20}{'RESOURCE_TYPE':20}{'RESOURCE_NAME':20}\n")
 
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # set custom retry strategy
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 custom_retry_strategy = oci.retry.RetryStrategyBuilder(
                                                         max_attempts_check=True,
@@ -168,12 +204,15 @@ custom_retry_strategy = oci.retry.RetryStrategyBuilder(
                                                         backoff_type=oci.retry.BACKOFF_FULL_JITTER_EQUAL_ON_THROTTLE_VALUE
                                                         ).get_retry_strategy()
 
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 # start analysis
-##################################################################################################################
+# - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-for region in all_regions:
+# Iterate over regions and compartments
+
+for region in analyzed_regions:
     config['region']=region.region_name
+    identity_client=oci.identity.IdentityClient(config=config, signer=signer)
     core_client=oci.core.ComputeClient(config=config, signer=signer)
     blk_storage_client=oci.core.BlockstorageClient(config=config, signer=signer)
     object_client=oci.object_storage.ObjectStorageClient(config=config, signer=signer)
@@ -195,810 +234,1126 @@ for region in all_regions:
     mesh_client=oci.service_mesh.ServiceMeshClient(config=config, signer=signer)
     visual_builder_client=oci.visual_builder.VbInstanceClient(config=config, signer=signer)
 
-    if cmd.target_region == '' or region.region_name in cmd.target_region:
-        identity_client=oci.identity.IdentityClient(config=config, signer=signer)
-        ADs=list_ads(identity_client, tenancy_id)
-
-        for compartment in my_compartments:
-            
-            print('   {}: Analyzing compartment: {}'.format(region.region_name, compartment.name[0:18]),end=' '*15+'\r',flush=True)
-
-            if cmd.compute:
-                ##########################################
-                # get compute instances
-                ##########################################
-                all_instances=list_instances(core_client, compartment.id)
-
-                for instance in all_instances:
-                    service='instance'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, instance.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        # 1- retrieve instance tags
-                        defined_tags_dict = copy.deepcopy(instance.defined_tags)
-
-                        # 2- add key/value to defined_tags_dict
-                        # 2a- if tagnamespace already exists in defined_tags_dict:
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = instance.display_name
-
-                        # 2b- else when tagnamespace doesn't exist in defined_tags_dict
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: instance.display_name}})
-                        
-                        tag_resources(service, core_client, instance.id, defined_tags_dict)
-                        print(yellow(f"{region.region_name:15}  {instance.availability_domain[-4:]:6}  {compartment.name[0:18]:20}  {service:15}  {instance.display_name[0:18]:20}"))
-
-                        ##########################################
-                        # get attached boot volume
-                        ##########################################
-                        instance_bootvolattach=list_instances_bootvol(core_client, instance.availability_domain, compartment.id, instance.id)
-
-                        for bootvolattach in instance_bootvolattach:
-                            service='bootvolume'
-                            print('   {}: Tagging {}: {}'.format(service, region.region_name, bootvolattach.display_name[0:18]),end=' '*15+'\r',flush=True)
-                            
-                            bootvol=blk_storage_client.get_boot_volume(bootvolattach.boot_volume_id).data
-
-                            defined_tags_dict = copy.deepcopy(bootvol.defined_tags)
-                            try:
-                                defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = instance.display_name
-                            except:
-                                defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: instance.display_name}})
-
-                            tag_resources(service, blk_storage_client, bootvol.id, defined_tags_dict)
-                            print(yellow(f"{region.region_name:15}  {bootvol.availability_domain[-4:]:6}  {compartment.name[0:18]:20}  {service:15}  {bootvol.display_name[0:18]:20}"))
-
-                        ##########################################
-                        # get boot volume backups
-                        ##########################################
-                        boot_volume_backups=list_boot_volume_backups(blk_storage_client, compartment.id, bootvol.id)
-
-                        for boot_volume_backup in boot_volume_backups:
-                            service='boot_backup'
-                            print('   {}: Tagging {}: {}'.format(service, region.region_name, boot_volume_backup.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                            bootvolbkp=blk_storage_client.get_boot_volume_backup(boot_volume_backup.id).data
-
-                            defined_tags_dict = copy.deepcopy(boot_volume_backup.defined_tags)
-                            try:
-                                defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = instance.display_name
-                            except:
-                                defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: instance.display_name}})
-
-                            tag_resources(service, blk_storage_client, boot_volume_backup.id, defined_tags_dict)
-                            print(yellow(f"{region.region_name:15}  {'-':6}  {compartment.name[0:18]:20}  {service:15}  {bootvolbkp.display_name[0:18]:20}"))
-
-                        ##########################################
-                        # get attached block volumes
-                        ##########################################
-                        try:
-                            instance_vol_attach=list_instances_volattach(core_client, instance.availability_domain, compartment.id, instance.id)
-
-                            for vol_attach in instance_vol_attach:
-                                service='volume'
-                                print('   {}: Tagging {}: {}'.format(service, region.region_name, vol_attach.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                                volume=blk_storage_client.get_volume(vol_attach.volume_id).data
-
-                                defined_tags_dict = copy.deepcopy(volume.defined_tags)
-                                try:
-                                    defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = instance.display_name
-                                except:
-                                    defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: instance.display_name}})
-
-                                tag_resources(service, blk_storage_client, volume.id, defined_tags_dict)
-                                print(yellow(f"{region.region_name:15}  {volume.availability_domain[-4:]:6}  {compartment.name[0:18]:20}  {service:15}  {volume.display_name[0:18]:20}"))
-
-                            ##########################################
-                            # get block volume backups
-                            ##########################################
-                            volume_backups=list_volume_backups(blk_storage_client, compartment.id, volume.id)
-
-                            for volume_backup in volume_backups:
-                                service='volume_backup'
-                                print('   {}: Tagging {}: {}'.format(service, region.region_name, volume_backup.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                                volbkp=blk_storage_client.get_volume_backup(volume_backup.id).data
-
-                                defined_tags_dict = copy.deepcopy(volume_backup.defined_tags)
-                                try:
-                                    defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = instance.display_name
-                                except:
-                                    defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: instance.display_name}})
-
-                                tag_resources(service, blk_storage_client, volume_backup.id, defined_tags_dict)
-                                print(yellow(f"{region.region_name:15}  {'-':6}  {compartment.name[0:18]:20}  {service:15}  {volbkp.display_name[0:18]:20}"))
-                        except:
-                            pass # pass if no block volumes or backups found
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{instance.display_name}\n ocid:{instance.id}\n {e}\n'))
-                        pass
-
-            if cmd.storage:
-                ##########################################
-                # get buckets
-                ##########################################
-                namespace_name=object_client.get_namespace().data
-                resources=list_buckets(object_client,namespace_name, compartment.id)
-
-                for resource in resources:
-                    service='bucket'
-
-                    try:
-                        working_bucket=object_client.get_bucket(namespace_name,resource.name).data
-
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, working_bucket.name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(working_bucket.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.name}})
-
-                        tag_resources(service, object_client, working_bucket.id, defined_tags_dict, working_bucket.name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {working_bucket.name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{working_bucket.name}\n ocid:{working_bucket.id}\n {e}\n'))
-                        pass
-                
-                ##########################################
-                # get fss
-                ##########################################
-                for ad in ADs:
-                    resources=list_fss(fss_client, ad, compartment.id)
-
-                    for resource in resources:
-                        service='fss'
-
-                        try:
-                            print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-                            
-                            defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                            try:
-                                defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                            except:
-                                defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-
-                            tag_resources(service, fss_client, resource.id, defined_tags_dict, resource.display_name)
-                            print(yellow(f"{region.region_name:15}  {resource.availability_domain[-4:]:6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                        except Exception as e:
-                            print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                            pass
-
-            if cmd.network:
-                ##########################################
-                # get load balancers
-                ##########################################
-                resources=list_load_balancers(loadbalancer_client, compartment.id)
-
-                for resource in resources:
-                    service='loadbalancer'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                        
-                        tag_resources(service, loadbalancer_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get network load balancers
-                ##########################################
-                resources=list_network_load_balancers(networkloadbalancer_client, compartment.id)
-
-                for resource in resources:
-                    service='ntwloadbalancer'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                        
-                        tag_resources(service, networkloadbalancer_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get network firewalls
-                ##########################################
-                resources=list_network_firewalls(networkfw_client, compartment.id)
-
-                for resource in resources:
-                    service='networkfw'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                        
-                        tag_resources(service, networkfw_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-            if cmd.database:
-                ##########################################
-                # get database systems
-                ##########################################
-                resources=list_dbsystems(database_client, compartment.id)
-
-                for resource in resources:
-                    service='dbsystem'
-
-                    try:
-                        try:
-                            print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                            defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                            try:
-                                defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                            except:
-                                defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                            
-                            tag_resources(service, database_client, resource.id, defined_tags_dict, resource.display_name)
-                            print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                        except Exception as e:
-                            print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                            pass
-
-                        ##########################################
-                        # get db_homes in database systems
-                        ##########################################
-                        dbhomes=list_db_homes(database_client, compartment.id, resource.id)
-
-                        for dbhome in dbhomes:
-                            service='dbhome'
-                            
-                            ##########################################
-                            # get databases in db_homes
-                            ##########################################
-                            databases=list_databases(database_client, compartment.id, dbhome.id)
-
-                            for database in databases:
-                                service='dbsys_db'
-
-                                try:
-                                    print('   {}: Tagging {}: {}'.format(service, region.region_name, database.db_name[0:18]),end=' '*15+'\r',flush=True)
-
-                                    defined_tags_dict = copy.deepcopy(database.defined_tags)
-                                    try:
-                                        defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                                    except:
-                                        defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-
-                                    tag_resources(service, database_client, database.id, defined_tags_dict, resource.display_name)
-                                    print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {database.db_name[0:18]:20}"))
-
-                                except Exception as e:
-                                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{database.db_name}\n ocid:{database.id}\n {e}\n'))
-                                    pass
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-                        
-                ##########################################
-                # get autonomous databases
-                ##########################################
-                resources=list_autonomous_db(database_client, compartment.id)
-
-                for resource in resources:
-                    service='autonomous'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                        
-                        tag_resources(service, database_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get cloud exadata infrastructures
-                ##########################################
-                resources=list_cloud_exadata_infrastructures(database_client, compartment.id)
-
-                for resource in resources:
-                    service='exa_infra'
-
-                    try:
-                        try:
-                            print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                            defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                            try:
-                                defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                            except:
-                                defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                            
-                            tag_resources(service, database_client, resource.id, defined_tags_dict)
-                            print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                        except Exception as e:
-                            print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                            pass
-
-                        ##########################################
-                        # get cloud_autonomous_vm_clusters
-                        ##########################################
-                        cloud_autonomous_vm_clusters=list_cloud_autonomous_vm_clusters(database_client, compartment.id, resource.id)
-
-                        for cloud_autonomous_vm_cluster in cloud_autonomous_vm_clusters:
-                            service='auto_vm_cluster'
-
-                            try:
-                                print('   {}: Tagging {}: {}'.format(service, region.region_name, cloud_autonomous_vm_cluster.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                                defined_tags_dict = copy.deepcopy(cloud_autonomous_vm_cluster.defined_tags)
-                                try:
-                                    defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                                except:
-                                    defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                                
-                                tag_resources(service, database_client, cloud_autonomous_vm_cluster.id, defined_tags_dict)
-                                print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {cloud_autonomous_vm_cluster.display_name[0:18]:20}"))
-
-                            except Exception as e:
-                                print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{cloud_autonomous_vm_cluster.display_name}\n ocid:{cloud_autonomous_vm_cluster.id}\n {e}\n'))
-                                pass
-
-                        ##########################################
-                        # get cloud_vm_clusters
-                        ##########################################
-                        cloud_vm_clusters=list_cloud_vm_clusters(database_client, compartment.id, resource.id)
-
-                        for cloud_vm_cluster in cloud_vm_clusters:
-                            service='cloud_vm_cluster'
-
-                            try:
-                                print('   {}: Tagging {}: {}'.format(service, region.region_name, cloud_vm_cluster.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                                defined_tags_dict = copy.deepcopy(cloud_vm_cluster.defined_tags)
-                                try:
-                                    defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                                except:
-                                    defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                                
-                                tag_resources(service, database_client, cloud_vm_cluster.id, defined_tags_dict)
-                                print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {cloud_vm_cluster.display_name[0:18]:20}"))
-
-                            except Exception as e:
-                                print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{cloud_vm_cluster.display_name}\n ocid:{cloud_vm_cluster.id}\n {e}\n'))
-                                pass
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{cloud_vm_cluster.display_name}\n ocid:{cloud_vm_cluster.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get MySQL databases
-                ##########################################
-                resources=list_mysql_db(mysql_client, compartment.id)
-
-                # MySQL instances must be running to update tag
-                # script starts inactive/untagged instances, apply tags and stops
-                stop_after_tag = False
-
-                for resource in resources:
-                    service='mysql'
-                    
-                    mysql_inst=mysql_client.get_db_system(resource.id).data
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, mysql_inst.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(mysql_inst.defined_tags)
-
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = mysql_inst.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: mysql_inst.display_name}})
-
-                        # if != means tag is missing
-                        if defined_tags_dict != mysql_inst.defined_tags:
-                                
-                            if (mysql_inst.lifecycle_state == 'INACTIVE'):
-                                stop_after_tag = True
-
-                                print('   Starting MySQL: {}'.format(mysql_inst.display_name),end=' '*40 +'\r',flush=True)
-
-                                mysql_client.start_db_system(
-                                                            mysql_inst.id, 
-                                                            retry_strategy=custom_retry_strategy
-                                                            )
-                                
-                                wait_response = oci.wait_until(
-                                                                mysql_client, 
-                                                                mysql_client.get_db_system(mysql_inst.id),
-                                                                'lifecycle_state', 
-                                                                'ACTIVE', 
-                                                                max_wait_seconds=600, 
-                                                                retry_strategy=custom_retry_strategy
-                                                                ).data
-
-                            tag_resources(service, mysql_client, mysql_inst.id, defined_tags_dict, mysql_inst.display_name)
-                            
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {mysql_inst.display_name[0:18]:20}"))
-
-                        # stop instance previously stopped
-                        if stop_after_tag == True:
-                                print('   Stopping MySQL: {}'.format(mysql_inst.display_name),end=' '*40 +'\r',flush=True)
-                                stop_db_system_details=oci.mysql.models.StopDbSystemDetails(shutdown_type="SLOW")
-                                mysql_client.stop_db_system(mysql_inst.id, stop_db_system_details, retry_strategy=custom_retry_strategy)
-                                wait_response = oci.wait_until(mysql_client, mysql_client.get_db_system(mysql_inst.id), 'lifecycle_state', 'UPDATING', max_wait_seconds=600).data
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{mysql_inst.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get NoSQL databases
-                ##########################################
-                resources=list_nosql_db(nosql_client, compartment.id)
-
-                for resource in resources:
-                    service='nosql'
-                    
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.name}})
-                        
-                        tag_resources(service, nosql_client, resource.id, defined_tags_dict, resource.name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get OpenSearch clusters
-                ##########################################
-                resources=list_opensearch_clusters(opensearch_client, compartment.id)
-
-                for resource in resources:
-                    service='opensearch'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                        
-                        tag_resources(service, opensearch_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-            if cmd.analytics:
-                ##########################################
-                # get analytics instances
-                ##########################################
-                resources=list_analytics(analytics_client, compartment.id)
- 
-                for resource in resources:
-                    service='analytics'
-                    resource=analytics_client.get_analytics_instance(resource.id).data
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.name}})
-                        
-                        tag_resources(service, analytics_client, resource.id, defined_tags_dict, resource.name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get big data instances
-                ##########################################
-                resources=list_bds(bds_client, compartment.id)
-
-                for resource in resources:
-                    service='bigdata'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                        
-                        tag_resources(service, bds_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get data catalogs
-                ##########################################
-                resources=list_catalogs(data_catalog_client, compartment.id)
-
-                for resource in resources:
-                    service='datacatalog'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-
-                        tag_resources(service, data_catalog_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                ##########################################
-                # get data integration catalogs
-                ##########################################
-                resources=list_workspaces(data_integration_client, compartment.id)
-
-                for resource in resources:
-                    service='dataintegration'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-
-                        tag_resources(service, data_integration_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-            if cmd.development:
-                ##########################################
-                # get function applications
-                ##########################################
-                resources=list_functions_app(function_client, compartment.id)
- 
-                for resource in resources:
-                    service='function_app'
-
-                    try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                        
-                        tag_resources(service, function_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
-
-                    ##########################################
-                    # get function instances
-                    ##########################################
-                    fn_apps=list_functions(function_client, resource.id)
+    all_ads=list_ads(identity_client, tenancy_id)
+    tagging_status = '   {}: Tagging {}: {}'
     
-                    for fn_app in fn_apps:
-                        service='function'
+    for compartment in my_compartments:
+        
+        finder = ResourcesFinder(compartment.id, custom_retry_strategy)
+        
+        print('   {}: Analyzing compartment: {}'.format(region.region_name, compartment.name[0:18]),end=' '*15+'\r',flush=True)
+
+        if cmd.compute:
+            #-----------------------------------------
+            # get compute instances
+            #-----------------------------------------
+            all_instances=finder.list_instances(core_client)
+
+            for instance in all_instances:
+                service='instance'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, instance.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    # 1- retrieve instance tags
+                    defined_tags_dict = copy.deepcopy(instance.defined_tags)
+
+                    # 2- add key/value to defined_tags_dict
+                    # 2a- if tagnamespace already exists in defined_tags_dict:
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = instance.display_name
+
+                    # 2b- else when tagnamespace doesn't exist in defined_tags_dict
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: instance.display_name}})
+                    
+                    tagger = ResourcesTagger(core_client)
+                    tagger.tag_instance_resource(instance.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': green,
+                        'region': region.region_name,
+                        'region_ad': instance.availability_domain,
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': instance.display_name
+                        }
+                    print_output(output_data)
+
+                    #-----------------------------------------
+                    # get attached boot volume
+                    #-----------------------------------------
+                    instance_bootvolattach=finder.list_instances_bootvol(core_client, instance.availability_domain, instance.id)
+
+                    for bootvolattach in instance_bootvolattach:
+                        service='bootvolume'
+                        print(tagging_status.format(service, region.region_name, bootvolattach.display_name[0:18]),end=' '*15+'\r',flush=True)
+                        
+                        bootvol=blk_storage_client.get_boot_volume(bootvolattach.boot_volume_id).data
+
+                        defined_tags_dict = copy.deepcopy(bootvol.defined_tags)
+                        try:
+                            defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = instance.display_name
+                        except Exception:
+                            defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: instance.display_name}})
+
+                        tagger = ResourcesTagger(blk_storage_client)
+                        tagger.tag_bootvolume_resource(bootvol.id, defined_tags_dict)
+
+                        output_data = {
+                            'color': green,
+                            'region': region.region_name,
+                            'region_ad': bootvol.availability_domain,
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': bootvol.display_name
+                            }
+                        print_output(output_data)
+                        
+                    #-----------------------------------------
+                    # get boot volume backups
+                    #-----------------------------------------
+                    boot_volume_backups=finder.list_boot_volume_backups(blk_storage_client, bootvol.id)
+
+                    for boot_volume_backup in boot_volume_backups:
+                        service='boot_backup'
+                        print(tagging_status.format(service, region.region_name, boot_volume_backup.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                        bootvolbkp=blk_storage_client.get_boot_volume_backup(boot_volume_backup.id).data
+
+                        defined_tags_dict = copy.deepcopy(boot_volume_backup.defined_tags)
+                        try:
+                            defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = instance.display_name
+                        except Exception:
+                            defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: instance.display_name}})
+
+                        tagger = ResourcesTagger(blk_storage_client)
+                        tagger.tag_boot_backup_resource(boot_volume_backup.id, defined_tags_dict)
+
+                        output_data = {
+                            'color': green,
+                            'region': region.region_name,
+                            'region_ad': ' - ',
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': bootvolbkp.display_name
+                            }
+                        print_output(output_data)
+
+                    #-----------------------------------------
+                    # get attached block volumes
+                    #-----------------------------------------
+                    try:
+                        instance_vol_attach=finder.list_instances_volattach(core_client, instance.availability_domain, instance.id)
+
+                        for vol_attach in instance_vol_attach:
+                            service='volume'
+                            print(tagging_status.format(service, region.region_name, vol_attach.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                            volume=blk_storage_client.get_volume(vol_attach.volume_id).data
+
+                            defined_tags_dict = copy.deepcopy(volume.defined_tags)
+                            try:
+                                defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = instance.display_name
+                            except Exception:
+                                defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: instance.display_name}})
+
+                            tagger = ResourcesTagger(blk_storage_client)
+                            tagger.tag_volume_resource(volume.id, defined_tags_dict)
+
+                            output_data = {
+                                'color': green,
+                                'region': region.region_name,
+                                'region_ad': volume.availability_domain,
+                                'compartment': compartment.name,
+                                'service': service, 
+                                'obj_name': volume.display_name
+                                }
+                            print_output(output_data)
+
+                        #-----------------------------------------
+                        # get block volume backups
+                        #-----------------------------------------
+                        volume_backups=finder.list_volume_backups(blk_storage_client, volume.id)
+
+                        for volume_backup in volume_backups:
+                            service='volume_backup'
+                            print(tagging_status.format(service, region.region_name, volume_backup.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                            volbkp=blk_storage_client.get_volume_backup(volume_backup.id).data
+
+                            defined_tags_dict = copy.deepcopy(volume_backup.defined_tags)
+                            try:
+                                defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = instance.display_name
+                            except Exception:
+                                defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: instance.display_name}})
+
+                            tagger = ResourcesTagger(blk_storage_client)
+                            tagger.tag_volume_backup_resource(volume_backup.id, defined_tags_dict)
+
+                            output_data = {
+                                'color': green,
+                                'region': region.region_name,
+                                'region_ad': ' - ',
+                                'compartment': compartment.name,
+                                'service': service, 
+                                'obj_name': volbkp.display_name
+                                }
+                            print_output(output_data)
+
+                    except Exception:
+                        pass # pass if no block volumes or backups found
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{instance.display_name}\n ocid:{instance.id}\n {e}\n'))
+                    
+
+        if cmd.storage:
+            #-----------------------------------------
+            # get buckets
+            #-----------------------------------------
+            namespace_name=object_client.get_namespace().data
+            resources=finder.list_buckets(object_client, namespace_name)
+
+            for resource in resources:
+                service='bucket'
+
+                try:
+                    working_bucket=object_client.get_bucket(namespace_name,resource.name).data
+
+                    print(tagging_status.format(service, region.region_name, working_bucket.name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(working_bucket.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.name}})
+
+                    tagger = ResourcesTagger(object_client)
+                    tagger.tag_bucket_resource(working_bucket.name, defined_tags_dict)
+
+                    output_data = {
+                        'color': yellow,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': working_bucket.name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{working_bucket.name}\n ocid:{working_bucket.id}\n {e}\n'))
+                    
+            
+            #-----------------------------------------
+            # get fss
+            #-----------------------------------------
+
+            for ad in all_ads:
+                resources=finder.list_fss(fss_client, ad)
+
+                for resource in resources:
+                    service='fss'
+
+                    try:
+                        print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+                        
+                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                        try:
+                            defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                        except Exception:
+                            defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+
+                        tagger = ResourcesTagger(fss_client)
+                        tagger.tag_fss_resource(resource.id, defined_tags_dict)
+
+                        output_data = {
+                            'color': yellow,
+                            'region': region.region_name,
+                            'region_ad': resource.availability_domain,
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': resource.display_name
+                            }
+                        print_output(output_data)
+
+                    except Exception as e:
+                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                        
+
+        if cmd.network:
+            #-----------------------------------------
+            # get load balancers
+            #-----------------------------------------
+            resources=finder.list_load_balancers(loadbalancer_client)
+
+            for resource in resources:
+                service='loadbalancer'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(loadbalancer_client)
+                    tagger.tag_lb_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': magenta,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get network load balancers
+            #-----------------------------------------
+            resources=finder.list_network_load_balancers(networkloadbalancer_client)
+
+            for resource in resources:
+                service='ntwloadbalancer'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(networkloadbalancer_client)
+                    tagger.tag_nlb_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': magenta,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get network firewalls
+            #-----------------------------------------
+            resources=finder.list_network_firewalls(networkfw_client)
+
+            for resource in resources:
+                service='networkfw'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(networkfw_client)
+                    tagger.tag_networkfw_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': magenta,
+                        'region': region.region_name,
+                        'region_ad': resource.availability_domain,
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+        if cmd.database:
+            #-----------------------------------------
+            # get database systems
+            #-----------------------------------------
+            resources=finder.list_dbsystems(database_client)
+
+            for resource in resources:
+                service='dbsystem'
+
+                try:
+                    try:
+                        print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                        try:
+                            defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                        except Exception:
+                            defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                        
+                        tagger = ResourcesTagger(database_client)
+                        tagger.tag_dbsystem_resource(resource.id, defined_tags_dict)
+
+                        output_data = {
+                            'color': cyan,
+                            'region': region.region_name,
+                            'region_ad': resource.availability_domain,
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': resource.display_name
+                            }
+                        print_output(output_data)
+
+                    except Exception as e:
+                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+
+                    #-----------------------------------------
+                    # get db_homes in database systems
+                    #-----------------------------------------
+                    dbhomes=finder.list_db_homes(database_client, resource.id)
+
+                    for dbhome in dbhomes:
+                        service='dbhome'
+                        
+                        #-----------------------------------------
+                        # get databases in db_homes
+                        #-----------------------------------------
+                        databases=finder.list_databases(database_client, dbhome.id)
+
+                        for database in databases:
+                            service='dbsys_db'
+
+                            try:
+                                print(tagging_status.format(service, region.region_name, database.db_name[0:18]),end=' '*15+'\r',flush=True)
+
+                                defined_tags_dict = copy.deepcopy(database.defined_tags)
+                                try:
+                                    defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                                except Exception:
+                                    defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+
+                                tagger = ResourcesTagger(database_client)
+                                tagger.tag_dbsys_db_resource(database.id, defined_tags_dict)
+
+                                output_data = {
+                                    'color': cyan,
+                                    'region': region.region_name,
+                                    'region_ad': ' - ',
+                                    'compartment': compartment.name,
+                                    'service': service, 
+                                    'obj_name': database.db_name
+                                    }
+                                print_output(output_data)
+
+                            except Exception as e:
+                                print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{database.db_name}\n ocid:{database.id}\n {e}\n'))
+                                
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+                    
+            #-----------------------------------------
+            # get autonomous databases
+            #-----------------------------------------
+            resources=finder.list_autonomous_db(database_client)
+
+            for resource in resources:
+                service='autonomous'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(database_client)
+                    tagger.tag_autonomous_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': cyan,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get cloud exadata infrastructures
+            #-----------------------------------------
+            resources=finder.list_cloud_exadata_infrastructures(database_client)
+
+            for resource in resources:
+                service='exa_infra'
+
+                try:
+                    try:
+                        print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                        try:
+                            defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                        except Exception:
+                            defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                        
+                        tagger = ResourcesTagger(database_client)
+                        tagger.tag_exa_infra_resource(resource.id, defined_tags_dict)
+
+                        output_data = {
+                            'color': cyan,
+                            'region': region.region_name,
+                            'region_ad': ' - ',
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': resource.display_name
+                            }
+                        print_output(output_data)
+
+                    except Exception as e:
+                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                        
+
+                    #-----------------------------------------
+                    # get cloud_autonomous_vm_clusters
+                    #-----------------------------------------
+                    cloud_autonomous_vm_clusters=finder.list_cloud_autonomous_vm_clusters(database_client, resource.id)
+
+                    for cloud_autonomous_vm_cluster in cloud_autonomous_vm_clusters:
+                        service='auto_vm_cluster'
 
                         try:
-                            print('   {}: Tagging {}: {}'.format(service, region.region_name, fn_app.display_name[0:18]),end=' '*15+'\r',flush=True)
+                            print(tagging_status.format(service, region.region_name, cloud_autonomous_vm_cluster.display_name[0:18]),end=' '*15+'\r',flush=True)
 
-                            defined_tags_dict = copy.deepcopy(fn_app.defined_tags)
+                            defined_tags_dict = copy.deepcopy(cloud_autonomous_vm_cluster.defined_tags)
                             try:
-                                defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                            except:
-                                defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
+                                defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = cloud_autonomous_vm_cluster.display_name
+                            except Exception:
+                                defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: cloud_autonomous_vm_cluster.display_name}})
                             
-                            tag_resources(service, function_client, fn_app.id, defined_tags_dict, fn_app.display_name)
-                            print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {fn_app.display_name[0:18]:20}"))
+                            tagger = ResourcesTagger(database_client)
+                            tagger.tag_auto_vm_cluster_resource(cloud_autonomous_vm_cluster.id, defined_tags_dict)
+
+                            output_data = {
+                                'color': cyan,
+                                'region': region.region_name,
+                                'region_ad': ' - ',
+                                'compartment': compartment.name,
+                                'service': service, 
+                                'obj_name': cloud_autonomous_vm_cluster.display_name
+                                }
+                            print_output(output_data)
 
                         except Exception as e:
-                            print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{fn_app.display_name}\n ocid:{fn_app.id}\n {e}\n'))
-                            pass
+                            print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{cloud_autonomous_vm_cluster.display_name}\n ocid:{cloud_autonomous_vm_cluster.id}\n {e}\n'))
+                            
 
-                ##########################################
-                # get container instances
-                ##########################################
-                resources=list_container_instances(container_client, compartment.id)
- 
-                for resource in resources:
-                    service='container'
+                    #-----------------------------------------
+                    # get cloud_vm_clusters
+                    #-----------------------------------------
+                    cloud_vm_clusters=finder.list_cloud_vm_clusters(database_client, resource.id)
+
+                    for cloud_vm_cluster in cloud_vm_clusters:
+                        service='cloud_vm_cluster'
+
+                        try:
+                            print(tagging_status.format(service, region.region_name, cloud_vm_cluster.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                            defined_tags_dict = copy.deepcopy(cloud_vm_cluster.defined_tags)
+                            try:
+                                defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = cloud_vm_cluster.display_name
+                            except Exception:
+                                defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: cloud_vm_cluster.display_name}})
+                            
+                            tagger = ResourcesTagger(database_client)
+                            tagger.tag_cloud_vm_cluster_resource(cloud_vm_cluster.id, defined_tags_dict)
+
+                            output_data = {
+                                'color': cyan,
+                                'region': region.region_name,
+                                'region_ad': ' - ',
+                                'compartment': compartment.name,
+                                'service': service, 
+                                'obj_name': cloud_vm_cluster.display_name
+                                }
+                            print_output(output_data)
+
+                        except Exception as e:
+                            print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{cloud_vm_cluster.display_name}\n ocid:{cloud_vm_cluster.id}\n {e}\n'))
+                            
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{cloud_vm_cluster.display_name}\n ocid:{cloud_vm_cluster.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get MySQL databases
+            #-----------------------------------------
+            resources=finder.list_mysql_db(mysql_client)
+
+            # MySQL instances must be running to update tag
+            # script starts inactive/untagged instances, apply tags and stops
+            stop_after_tag = False
+
+            for resource in resources:
+                service='mysql'
+                
+                mysql_inst=mysql_client.get_db_system(resource.id).data
+
+                try:
+                    print(tagging_status.format(service, region.region_name, mysql_inst.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(mysql_inst.defined_tags)
 
                     try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = mysql_inst.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: mysql_inst.display_name}})
 
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
-                        
-                        tag_resources(service, container_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
+                    # if != means tag is missing
+                    if defined_tags_dict != mysql_inst.defined_tags:
+                            
+                        if (mysql_inst.lifecycle_state == 'INACTIVE'):
+                            stop_after_tag = True
 
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
+                            print('   Starting MySQL: {}'.format(mysql_inst.display_name),end=' '*40 +'\r',flush=True)
 
-                ##########################################
-                # get artifact repositories
-                ##########################################
-                resources=list_repositories(artifact_client, compartment.id)
- 
-                for resource in resources:
-                    service='artifact'
+                            mysql_client.start_db_system(
+                                                        mysql_inst.id, 
+                                                        retry_strategy=custom_retry_strategy
+                                                        )
+                            
+                            oci.wait_until(
+                                            mysql_client, 
+                                            mysql_client.get_db_system(mysql_inst.id),
+                                            'lifecycle_state', 
+                                            'ACTIVE', 
+                                            max_wait_seconds=600, 
+                                            retry_strategy=custom_retry_strategy
+                                            ).data
+
+                        tagger = ResourcesTagger(mysql_client)
+                        tagger.tag_cloud_vm_cluster_resource(mysql_inst.id, defined_tags_dict)
+
+                        output_data = {
+                            'color': cyan,
+                            'region': region.region_name,
+                            'region_ad': ' - ',
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': mysql_inst.display_name
+                            }
+                        print_output(output_data)
+
+                    # stop instance previously stopped
+                    if stop_after_tag == True:
+                            print('   Stopping MySQL: {}'.format(mysql_inst.display_name),end=' '*40 +'\r',flush=True)
+                            stop_db_system_details=oci.mysql.models.StopDbSystemDetails(shutdown_type="SLOW")
+                            mysql_client.stop_db_system(mysql_inst.id, stop_db_system_details, retry_strategy=custom_retry_strategy)
+                            wait_response = oci.wait_until(mysql_client, mysql_client.get_db_system(mysql_inst.id), 'lifecycle_state', 'UPDATING', max_wait_seconds=600).data
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{mysql_inst.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get NoSQL databases
+            #-----------------------------------------
+            resources=finder.list_nosql_db(nosql_client)
+
+            for resource in resources:
+                service='nosql'
+                
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.name}})
+                    
+                    tagger = ResourcesTagger(nosql_client)
+                    tagger.tag_nosql_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': cyan,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get OpenSearch clusters
+            #-----------------------------------------
+            resources=finder.list_opensearch_clusters(opensearch_client)
+
+            for resource in resources:
+                service='opensearch'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(opensearch_client)
+                    tagger.tag_opensearch_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': cyan,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+        if cmd.analytics:
+            #-----------------------------------------
+            # get analytics instances
+            #-----------------------------------------
+            resources=finder.list_analytics(analytics_client)
+
+            for resource in resources:
+                service='analytics'
+                resource=analytics_client.get_analytics_instance(resource.id).data
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.name}})
+                    
+                    tagger = ResourcesTagger(analytics_client)
+                    tagger.tag_analytics_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': cyan,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get big data instances
+            #-----------------------------------------
+            resources=finder.list_bds(bds_client)
+
+            for resource in resources:
+                service='bigdata'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(bds_client)
+                    tagger.tag_bigdata_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': cyan,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get data catalogs
+            #-----------------------------------------
+            resources=finder.list_catalogs(data_catalog_client)
+
+            for resource in resources:
+                service='datacatalog'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+
+                    tagger = ResourcesTagger(data_catalog_client)
+                    tagger.tag_data_catalog_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': cyan,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get data integration catalogs
+            #-----------------------------------------
+            resources=finder.list_workspaces(data_integration_client)
+
+            for resource in resources:
+                service='dataintegration'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+
+                    tagger = ResourcesTagger(data_integration_client)
+                    # submit 2 attributes as a workaround, crashs if only one submitted (oci v2.105.0)
+                    # see https://github.com/oracle/oci-python-sdk/issues/546
+                    tagger.tag_data_integration_resource(resource.display_name, resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': cyan,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+        if cmd.development:
+            #-----------------------------------------
+            # get function applications
+            #-----------------------------------------
+            resources=finder.list_functions_app(function_client)
+
+            for resource in resources:
+                service='function_app'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(function_client)
+                    tagger.tag_function_app_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': red,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+                #-----------------------------------------
+                # get function instances
+                #-----------------------------------------
+                fn_apps=finder.list_functions(function_client, resource.id)
+
+                for fn_app in fn_apps:
+                    service='function'
 
                     try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+                        print(tagging_status.format(service, region.region_name, fn_app.display_name[0:18]),end=' '*15+'\r',flush=True)
 
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                        defined_tags_dict = copy.deepcopy(fn_app.defined_tags)
                         try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
+                            defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                        except Exception:
+                            defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
                         
-                        tag_resources(service, artifact_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
+                        tagger = ResourcesTagger(function_client)
+                        tagger.tag_function_resource(fn_app.id, defined_tags_dict)
+
+                        output_data = {
+                            'color': red,
+                            'region': region.region_name,
+                            'region_ad': ' - ',
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': fn_app.display_name
+                            }
+                        print_output(output_data)
 
                     except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
+                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{fn_app.display_name}\n ocid:{fn_app.id}\n {e}\n'))
+                        
 
-                ##########################################
-                # get mesh instances
-                ##########################################
-                resources=list_meshes(mesh_client, compartment.id)
- 
-                for resource in resources:
-                    service='mesh'
+            #-----------------------------------------
+            # get container instances
+            #-----------------------------------------
+            resources=finder.list_container_instances(container_client)
+
+            for resource in resources:
+                service='container'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(container_client)
+                    tagger.tag_container_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': red,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get artifact repositories
+            #-----------------------------------------
+            resources=finder.list_repositories(artifact_client)
+
+            for resource in resources:
+                service='artifact'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(artifact_client)
+                    tagger.tag_artifact_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': red,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get mesh instances
+            #-----------------------------------------
+            resources=finder.list_meshes(mesh_client)
+
+            for resource in resources:
+                service='mesh'
+
+                try:
+                    print(tagging_status.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(resource.defined_tags)
+                    try:
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = resource.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: resource.display_name}})
+                    
+                    tagger = ResourcesTagger(mesh_client)
+                    tagger.tag_mesh_resource(resource.id, defined_tags_dict)
+
+                    output_data = {
+                        'color': red,
+                        'region': region.region_name,
+                        'region_ad': ' - ',
+                        'compartment': compartment.name,
+                        'service': service, 
+                        'obj_name': resource.display_name
+                        }
+                    print_output(output_data)
+
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
+                    
+
+            #-----------------------------------------
+            # get visual builder instances
+            #-----------------------------------------
+            resources=finder.list_vb_instances(visual_builder_client)
+
+            # VB instances must be running to update tag
+            # script starts inactive/untagged instances, apply tags and stops
+            stop_after_tag = False
+
+            for resource in resources:
+                service='visual_builder'
+
+                vb_inst=visual_builder_client.get_vb_instance(resource.id).data
+
+                try:                
+                    print(tagging_status.format(service, region.region_name, vb_inst.display_name[0:18]),end=' '*15+'\r',flush=True)
+
+                    defined_tags_dict = copy.deepcopy(vb_inst.defined_tags)
 
                     try:
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, resource.display_name[0:18]),end=' '*15+'\r',flush=True)
+                        defined_tags_dict[cmd.tag_namespace][cmd.tag_key] = vb_inst.display_name
+                    except Exception:
+                        defined_tags_dict.update({cmd.tag_namespace: {cmd.tag_key: vb_inst.display_name}})
 
-                        defined_tags_dict = copy.deepcopy(resource.defined_tags)
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = resource.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: resource.display_name}})
+                    # if != means tag is missing
+                    if defined_tags_dict != vb_inst.defined_tags:
+
+                        if (vb_inst.lifecycle_state == 'INACTIVE'):
+                            stop_after_tag = True
+
+                            print('   Starting Visual Builder: {}'.format(vb_inst.display_name),end=' '*40 +'\r',flush=True)
+
+                            visual_builder_client.start_vb_instance(
+                                                                    vb_inst.id, 
+                                                                    retry_strategy=custom_retry_strategy
+                                                                    )
+
+                            oci.wait_until(
+                                            visual_builder_client, 
+                                            visual_builder_client.get_vb_instance(vb_inst.id), 
+                                            'lifecycle_state', 
+                                            'ACTIVE', 
+                                            max_wait_seconds=600, 
+                                            retry_strategy=custom_retry_strategy
+                                            ).data
+
+                        tagger = ResourcesTagger(visual_builder_client)
+                        tagger.tag_visual_builder_resource(vb_inst.id, defined_tags_dict)
+
+                        oci.wait_until(
+                                        visual_builder_client, 
+                                        visual_builder_client.get_vb_instance(vb_inst.id), 
+                                        'lifecycle_state', 'ACTIVE', 
+                                        max_wait_seconds=600
+                                        ).data
                         
-                        tag_resources(service, mesh_client, resource.id, defined_tags_dict, resource.display_name)
-                        print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {resource.display_name[0:18]:20}"))
+                        output_data = {
+                            'color': yellow,
+                            'region': region.region_name,
+                            'region_ad': ' - ',
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': vb_inst.display_name
+                            }
+                        print_output(output_data)
 
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{resource.display_name}\n ocid:{resource.id}\n {e}\n'))
-                        pass
+                    else:                        
+                        output_data = {
+                            'color': magenta,
+                            'region': region.region_name,
+                            'region_ad': ' - ',
+                            'compartment': compartment.name,
+                            'service': service, 
+                            'obj_name': vb_inst.display_name
+                            }
+                        print_output(output_data)
 
-                ##########################################
-                # get visual builder instances
-                ##########################################
-                resources=list_vb_instances(visual_builder_client, compartment.id)
+                    # stop instance previously stopped
+                    if stop_after_tag == True:
+                            print('   Stopping Visual Builder: {}'.format(vb_inst.display_name),end=' '*40 +'\r',flush=True)
+                            visual_builder_client.stop_vb_instance(
+                                                                   vb_inst.id, 
+                                                                   retry_strategy=custom_retry_strategy
+                                                                   )
+                            oci.wait_until(
+                                            visual_builder_client, 
+                                            visual_builder_client.get_vb_instance(vb_inst.id), 
+                                            'lifecycle_state', 
+                                            'UPDATING', 
+                                            max_wait_seconds=600
+                                            ).data
 
-                # VB instances must be running to update tag
-                # script starts inactive/untagged instances, apply tags and stops
-                stop_after_tag = False
-
-                for resource in resources:
-                    service='visual_builder'
-
-                    vb_inst=visual_builder_client.get_vb_instance(resource.id).data
-
-                    try:                
-                        print('   {}: Tagging {}: {}'.format(service, region.region_name, vb_inst.display_name[0:18]),end=' '*15+'\r',flush=True)
-
-                        defined_tags_dict = copy.deepcopy(vb_inst.defined_tags)
-
-                        try:
-                            defined_tags_dict[cmd.TagNamespace][cmd.TagKey] = vb_inst.display_name
-                        except:
-                            defined_tags_dict.update({cmd.TagNamespace: {cmd.TagKey: vb_inst.display_name}})
-
-                        # if != means tag is missing
-                        if defined_tags_dict != vb_inst.defined_tags:
-
-                            if (vb_inst.lifecycle_state == 'INACTIVE'):
-                                stop_after_tag = True
-
-                                print('   Starting Visual Builder: {}'.format(vb_inst.display_name),end=' '*40 +'\r',flush=True)
-
-                                visual_builder_client.start_vb_instance(
-                                                                        vb_inst.id, 
-                                                                        retry_strategy=custom_retry_strategy
-                                                                        )
-
-                                wait_response = oci.wait_until(
-                                                                visual_builder_client, 
-                                                                visual_builder_client.get_vb_instance(vb_inst.id), 
-                                                                'lifecycle_state', 
-                                                                'ACTIVE', 
-                                                                max_wait_seconds=600, 
-                                                                retry_strategy=custom_retry_strategy
-                                                                ).data
+                except Exception as e:
+                    print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{vb_inst.display_name}\n ocid:{vb_inst.id}\n {e}\n'))
+                    
 
 
-                            tag_resources(service, visual_builder_client, vb_inst.id, defined_tags_dict, vb_inst.display_name)
-                            wait_response = oci.wait_until(visual_builder_client, visual_builder_client.get_vb_instance(vb_inst.id), 'lifecycle_state', 'ACTIVE', max_wait_seconds=600).data
-                            print(yellow(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {vb_inst.display_name[0:18]:20}"))
-                        else:
-                            print(magenta(f"{region.region_name:15}  {' - ':6}  {compartment.name[0:18]:20}  {service:15}  {vb_inst.display_name[0:18]:20}"))
-                            pass
-
-                        # stop instance previously stopped
-                        if stop_after_tag == True:
-                                print('   Stopping Visual Builder: {}'.format(vb_inst.display_name),end=' '*40 +'\r',flush=True)
-                                visual_builder_client.stop_vb_instance(vb_inst.id, retry_strategy=custom_retry_strategy)
-                                wait_response = oci.wait_until(visual_builder_client, visual_builder_client.get_vb_instance(vb_inst.id), 'lifecycle_state', 'UPDATING', max_wait_seconds=600).data
-
-                    except Exception as e:
-                        print(red(f'\n region:{region.region_name}\n compartment:{compartment.name}\n name:{vb_inst.display_name}\n ocid:{vb_inst.id}\n {e}\n'))
-                        pass
-
-
-print(' '*40)
-ended = datetime.datetime.now()
-print(f"\nExecution time: {ended-starting}\n")
+print(' '*60)
+analysis_end = datetime.now()
+execution_time = analysis_end - analysis_start
+print(f"Execution time: {strfdelta(execution_time)}\n")
